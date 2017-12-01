@@ -38,7 +38,7 @@ const (
 var (
 	flagSrc        = flag.String("src", path.Join(".", "public"), "The path of the source directory.")
 	flagDest       = flag.String("dest", ".", "The destination path of the generated package.")
-	flagNoMtime    = flag.Bool("m", false, "Ignore modification times on files.")
+	flagMtime      = flag.Bool("m", false, "Takes modification times on files into account.")
 	flagNoCompress = flag.Bool("Z", false, "Do not use compression to shrink the files.")
 	flagForce      = flag.Bool("f", false, "Overwrite destination file if it already exists.")
 )
@@ -151,7 +151,9 @@ func generateSource(srcPath string) (file *os.File, err error) {
 		if err != nil {
 			return err
 		}
-		if *flagNoMtime {
+		// zero modification times by default: it is not used and simplifies
+		// reproducible builds
+		if !*flagMtime {
 			// Always use the same modification time so that
 			// the output is deterministic with respect to the file contents.
 			fHeader.SetModTime(mtimeDate)
