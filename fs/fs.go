@@ -111,7 +111,6 @@ func unzip(zf *zip.File) (*file, error) {
 }
 
 func (fs *StatikFS) get(name string) (*file, bool) {
-	name = strings.Replace(name, "//", "/", -1)
 	f, ok := fs.files[name]
 	if ok {
 		return f, true
@@ -135,7 +134,7 @@ func (fs *StatikFS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	f, ok := fs.get(r.URL.Path)
 	if !ok {
-		http.Error(w, "File asset not found", http.StatusNotFound)
+		http.Error(w, "Asset file not found", http.StatusNotFound)
 		return
 	}
 
@@ -184,7 +183,7 @@ func (fs *StatikFS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func scanETag(s string) (etag string, remain string) {
 	start := 0
 
-	if strings.HasPrefix(s, "W/") {
+	if len(s) >= 2 && s[0] == 'W' && s[1] == '/' {
 		start = 2
 	}
 
