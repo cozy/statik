@@ -79,10 +79,40 @@ func main() {
 		exitWithError(err)
 	}
 
-	err = rename(file.Name(), path.Join(destDir, nameSourceFile))
+	src := file.Name()
+	dest := path.Join(destDir, nameSourceFile)
+
+	hSrc, err := shasum(src)
 	if err != nil {
 		exitWithError(err)
 	}
+	hDest, err := shasum(dest)
+	if err != nil {
+		exitWithError(err)
+	}
+
+	if !bytes.Equal(hSrc, hDest) {
+		err = rename(src, dest)
+		if err != nil {
+			exitWithError(err)
+		}
+		fmt.Println("asset file updated successfully")
+	} else {
+		fmt.Println("asset file left unchanged")
+	}
+}
+
+func shasum(file string) ([]byte, error) {
+	h := sha256.New()
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }
 
 // rename tries to os.Rename, but fall backs to copying from src
