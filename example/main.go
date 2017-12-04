@@ -18,6 +18,6 @@ func main() {
 		log.Fatal(err)
 	}
 
-	http.Handle("/public/", http.StripPrefix("/public", statikFS))
+	http.Handle("/public/", statikFS.Handler("/public"))
 	http.ListenAndServe(":8080", nil)
 }
