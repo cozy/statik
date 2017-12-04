@@ -50,6 +50,9 @@ var files map[string]*file
 // Register registers zip contents data, later used to initialize
 // the statik file system.
 func Register(zipData string) {
+	if files != nil {
+		panic("statik/fs: already registered")
+	}
 	if zipData == "" {
 		panic("statik/fs: no zip data registered")
 	}
@@ -109,6 +112,9 @@ func unzip(zf *zip.File) (*file, error) {
 }
 
 func Open(name string) (*bytes.Reader, error) {
+	if files == nil {
+		panic("statik/fs: not registered")
+	}
 	f, ok := files[name]
 	if ok {
 		return bytes.NewReader(f.data), nil
@@ -117,6 +123,9 @@ func Open(name string) (*bytes.Reader, error) {
 }
 
 func Handler(prefix string, privates ...string) *StatikHandler {
+	if files == nil {
+		panic("statik/fs: not registered")
+	}
 	fs := make(map[string]*file)
 	for n, f := range files {
 		isPrivate := false
@@ -158,7 +167,7 @@ func extractFileID(file string) (string, string) {
 func (h *StatikHandler) AssetPath(file string) string {
 	f, ok := h.files[file]
 	if !ok {
-		return file
+		return h.prefix + file
 	}
 	return h.prefix + f.name
 }
