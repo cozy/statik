@@ -92,7 +92,7 @@ func unzip(zf *zip.File) (*file, error) {
 	}
 
 	h := md5.New()
-	io.TeeReader(r, h)
+	r = io.TeeReader(r, h)
 	data, err := ioutil.ReadAll(r)
 	if err != nil {
 		return nil, err
@@ -199,7 +199,7 @@ func scanETag(s string) (etag string, remain string) {
 		// Character values allowed in ETags.
 		case c == 0x21 || c >= 0x23 && c <= 0x7E || c >= 0x80:
 		case c == '"':
-			return string(s[:i+1]), s[i+1:]
+			return s[:i+1], s[i+1:]
 		default:
 			return "", ""
 		}
