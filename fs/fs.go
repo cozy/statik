@@ -28,12 +28,13 @@ import (
 	"net/textproto"
 	"os"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"camlistore.org/pkg/magic"
 )
+
+const sumLen = 12
 
 var zipData string
 
@@ -43,6 +44,7 @@ type file struct {
 	data  []byte
 	size  string
 	etag  string
+	name  string
 	mime  string
 }
 
@@ -72,7 +74,7 @@ func New() (*StatikFS, error) {
 		if err != nil {
 			return nil, fmt.Errorf("statik/fs: error unzipping file %q: %s", zipFile.Name, err)
 		}
-		files[path.Join("/", filepath.ToSlash(zipFile.Name))] = f
+		files[zipFile.Name] = f
 	}
 	return &StatikFS{files}, nil
 }
@@ -99,13 +101,20 @@ func unzip(zf *zip.File) (*file, error) {
 		return nil, err
 	}
 
-	etag := fmt.Sprintf(`"%s"`, hex.EncodeToString(h.Sum(nil)))
+	sumx := hex.EncodeToString(h.Sum(nil))
+	etag := fmt.Sprintf(`"%s"`, sumx)
 	size := strconv.Itoa(len(data))
+
+	name := zf.Name
+	if off := strings.IndexByte(name, '.'); off >= 0 {
+		name = name[:off] + "." + sumx[:sumLen] + name[off:]
+	}
 
 	return &file{
 		infos: zf.FileInfo(),
 		data:  data,
 		etag:  etag,
+		name:  name,
 		size:  size,
 		mime:  mime,
 	}, nil
@@ -119,7 +128,7 @@ func (fs *StatikFS) Open(name string) (*bytes.Reader, error) {
 	return nil, os.ErrNotExist
 }
 
-func (fs *StatikFS) Handler(privates ...string) http.Handler {
+func (fs *StatikFS) Handler(prefix string, privates ...string) *StatikHandler {
 	files := make(map[string]*file)
 	for n, f := range fs.files {
 		isPrivate := false
@@ -133,22 +142,54 @@ func (fs *StatikFS) Handler(privates ...string) http.Handler {
 			files[n] = f
 		}
 	}
-	return &statikHandler{files: files}
+	return &StatikHandler{
+		prefix: prefix,
+		files:  files,
+	}
 }
 
-type statikHandler struct {
-	files map[string]*file
+type StatikHandler struct {
+	prefix string
+	files  map[string]*file
 }
 
-func (fs *statikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func extractFileID(file string) (string, string) {
+	var id string
+	base := path.Base(file)
+	off1 := strings.IndexByte(base, '.') + 1
+	if off1 < len(base) {
+		off2 := off1 + strings.IndexByte(base[off1:], '.')
+		if off2-off1 == sumLen {
+			id = base[off1:off2]
+			file = path.Dir(file) + "/" + base[:off1-1] + base[off2:]
+		}
+	}
+	return file, id
+}
+
+func (h *StatikHandler) AssetPath(file string) string {
+	f, ok := h.files[file]
+	if !ok {
+		return file
+	}
+	return h.prefix + f.name
+}
+
+func (h *StatikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	f, ok := fs.files[r.URL.Path]
+	var id string
+	file := strings.TrimPrefix(r.URL.Path, h.prefix)
+	file, id = extractFileID(file)
+	if len(file) > 0 && file[0] != '/' {
+		file = "/" + file
+	}
+	f, ok := h.files[file]
 	if !ok {
-		http.Error(w, "Asset file not found", http.StatusNotFound)
+		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
 
@@ -182,10 +223,16 @@ func (fs *statikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h := w.Header()
-	h.Set("Content-Type", f.mime)
-	h.Set("Content-Length", f.size)
-	h.Set("Etag", f.etag)
+	headers := w.Header()
+	headers.Set("Content-Type", f.mime)
+	headers.Set("Content-Length", f.size)
+	headers.Set("Etag", f.etag)
+	if id != "" {
+		headers.Set("Cache-Control", "max-age=31557600")
+	} else {
+		headers.Set("Cache-Control", "no-cache")
+	}
+
 	if r.Method == http.MethodGet {
 		io.Copy(w, bytes.NewReader(f.data))
 	}
