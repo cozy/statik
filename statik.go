@@ -299,7 +299,9 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 		fieldsLen := len(fields)
 
 		if fieldsLen == 0 {
-			ext = nil
+			if ext != nil {
+				return errExternalsMalformed
+			}
 		} else if fieldsLen == 2 {
 			if ext == nil {
 				ext = new(external)
@@ -323,19 +325,26 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 			continue
 		}
 
+		var data []byte
 		fmt.Printf("file %q... ", ext.name)
 		if obj, ok := files[ext.name]; ok {
 			if bytes.Equal(obj.sum, ext.sha256) {
-				if _, err = writeExternal(w, ext, obj.data); err != nil {
-					return
-				}
-				fmt.Println("skipped")
-				continue
+				data = obj.data
 			}
 		}
-		if err = downloadExternal(w, ext); err != nil {
-			return
+
+		if len(data) == 0 {
+			if err = downloadExternal(w, ext); err != nil {
+				return
+			}
+		} else {
+			if _, err = writeExternal(w, ext, data); err != nil {
+				return
+			}
+			fmt.Println("skipped")
 		}
+
+		ext = nil
 	}
 
 	return scanner.Err()
@@ -347,7 +356,7 @@ func downloadExternal(w *zip.Writer, ext *external) (err error) {
 	fmt.Printf("downloading... ")
 	defer func() {
 		if err == nil {
-			fmt.Printf(" ok (%s)\n", humanize.Bytes(size))
+			fmt.Printf("ok (%s)\n", humanize.Bytes(size))
 		}
 	}()
 
