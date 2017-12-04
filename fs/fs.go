@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -36,8 +35,6 @@ import (
 
 const sumLen = 12
 
-var zipData string
-
 // file holds unzipped read-only file contents and file metadata.
 type file struct {
 	infos os.FileInfo
@@ -48,35 +45,26 @@ type file struct {
 	mime  string
 }
 
-type StatikFS struct {
-	files map[string]*file
-}
+var files map[string]*file
 
 // Register registers zip contents data, later used to initialize
 // the statik file system.
-func Register(data string) {
-	zipData = data
-}
-
-// New creates a new file system with the registered zip contents data.
-// It unzips all files and stores them in an in-memory map.
-func New() (*StatikFS, error) {
+func Register(zipData string) {
 	if zipData == "" {
-		return nil, errors.New("statik/fs: no zip data registered")
+		panic("statik/fs: no zip data registered")
 	}
 	zipReader, err := zip.NewReader(strings.NewReader(zipData), int64(len(zipData)))
 	if err != nil {
-		return nil, err
+		panic(fmt.Errorf("statik/fs: %s", err))
 	}
-	files := make(map[string]*file)
+	files = make(map[string]*file)
 	for _, zipFile := range zipReader.File {
 		f, err := unzip(zipFile)
 		if err != nil {
-			return nil, fmt.Errorf("statik/fs: error unzipping file %q: %s", zipFile.Name, err)
+			panic(fmt.Errorf("statik/fs: error unzipping file %q: %s", zipFile.Name, err))
 		}
 		files[zipFile.Name] = f
 	}
-	return &StatikFS{files}, nil
 }
 
 func unzip(zf *zip.File) (*file, error) {
@@ -120,17 +108,17 @@ func unzip(zf *zip.File) (*file, error) {
 	}, nil
 }
 
-func (fs *StatikFS) Open(name string) (*bytes.Reader, error) {
-	f, ok := fs.files[name]
+func Open(name string) (*bytes.Reader, error) {
+	f, ok := files[name]
 	if ok {
 		return bytes.NewReader(f.data), nil
 	}
 	return nil, os.ErrNotExist
 }
 
-func (fs *StatikFS) Handler(prefix string, privates ...string) *StatikHandler {
-	files := make(map[string]*file)
-	for n, f := range fs.files {
+func Handler(prefix string, privates ...string) *StatikHandler {
+	fs := make(map[string]*file)
+	for n, f := range files {
 		isPrivate := false
 		for _, p := range privates {
 			if strings.HasPrefix(n, p) {
@@ -139,12 +127,12 @@ func (fs *StatikFS) Handler(prefix string, privates ...string) *StatikHandler {
 			}
 		}
 		if !isPrivate {
-			files[n] = f
+			fs[n] = f
 		}
 	}
 	return &StatikHandler{
 		prefix: prefix,
-		files:  files,
+		files:  fs,
 	}
 }
 
