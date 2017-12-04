@@ -28,6 +28,7 @@ import (
 	"net/textproto"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -71,7 +72,7 @@ func New() (*StatikFS, error) {
 		if err != nil {
 			return nil, fmt.Errorf("statik/fs: error unzipping file %q: %s", zipFile.Name, err)
 		}
-		files["/"+zipFile.Name] = f
+		files[path.Join("/", filepath.ToSlash(zipFile.Name))] = f
 	}
 	return &StatikFS{files}, nil
 }
