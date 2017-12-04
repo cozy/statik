@@ -111,29 +111,42 @@ func unzip(zf *zip.File) (*file, error) {
 	}, nil
 }
 
-func (fs *StatikFS) get(name string) (*file, bool) {
-	f, ok := fs.files[name]
-	if ok {
-		return f, true
-	}
-	return nil, false
-}
-
 func (fs *StatikFS) Open(name string) (*bytes.Reader, error) {
-	f, ok := fs.get(name)
+	f, ok := fs.files[name]
 	if ok {
 		return bytes.NewReader(f.data), nil
 	}
 	return nil, os.ErrNotExist
 }
 
-func (fs *StatikFS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (fs *StatikFS) Handler(privates ...string) http.Handler {
+	files := make(map[string]*file)
+	for n, f := range fs.files {
+		isPrivate := false
+		for _, p := range privates {
+			if strings.HasPrefix(n, p) {
+				isPrivate = true
+				break
+			}
+		}
+		if !isPrivate {
+			files[n] = f
+		}
+	}
+	return &statikHandler{files: files}
+}
+
+type statikHandler struct {
+	files map[string]*file
+}
+
+func (fs *statikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	f, ok := fs.get(r.URL.Path)
+	f, ok := fs.files[r.URL.Path]
 	if !ok {
 		http.Error(w, "Asset file not found", http.StatusNotFound)
 		return
