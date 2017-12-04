@@ -28,13 +28,7 @@ import (
 )
 
 // ...
-
-  statikFS, err := fs.New()
-  if err != nil {
-    log.Fatal(err)
-  }
-
-  http.Handle("/public/", http.StripPrefix("/public/", http.FileServer(statikFS)))
+  http.Handle("/public/", http.FileServer(fs.Handler("/public")))
   http.ListenAndServe(":8080", nil)
 ~~~
 

@@ -33,7 +33,7 @@ import (
 	"camlistore.org/pkg/magic"
 )
 
-const sumLen = 12
+const sumLen = 9
 
 // file holds unzipped read-only file contents and file metadata.
 type file struct {
