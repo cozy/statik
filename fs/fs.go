@@ -223,10 +223,10 @@ func (h *StatikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	headers := w.Header()
 	headers.Set("Content-Type", f.mime)
 	headers.Set("Content-Length", f.size)
-	headers.Set("Etag", f.etag)
 	if id != "" {
 		headers.Set("Cache-Control", "max-age=31557600")
 	} else {
+		headers.Set("Etag", f.etag)
 		headers.Set("Cache-Control", "no-cache")
 	}
 
