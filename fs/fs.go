@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -56,7 +57,8 @@ func Register(zipData string) {
 	if zipData == "" {
 		panic("statik/fs: no zip data registered")
 	}
-	zipReader, err := zip.NewReader(strings.NewReader(zipData), int64(len(zipData)))
+	block, _ := pem.Decode([]byte(zipData))
+	zipReader, err := zip.NewReader(bytes.NewReader(block.Bytes), int64(len(block.Bytes)))
 	if err != nil {
 		panic(fmt.Errorf("statik/fs: %s", err))
 	}

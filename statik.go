@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -237,9 +238,11 @@ import (
 )
 
 func init() {
-	data := "`, namePackage)
+	data := `, namePackage)
+	qb.WriteByte('`')
 	FprintZipData(&qb, buffer.Bytes())
-	fmt.Fprint(&qb, `"
+	qb.WriteByte('`')
+	fmt.Fprint(&qb, `
 	fs.Register(data)
 }
 `)
@@ -259,13 +262,10 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 
 	var zippedData []byte
 	if len(statikFile) > 0 {
-		i := bytes.Index(statikFile, []byte(`data := "`))
-		if i >= 0 {
-			i += len(`data := "`)
-			j := bytes.IndexByte(statikFile[i:], '\n')
-			if j >= 1 {
-				zippedData = statikFile[i : i+j-1]
-			}
+		i := bytes.Index(statikFile, []byte(`-----BEGIN COZY ASSETS-----`))
+		j := bytes.Index(statikFile, []byte(`-----END COZY ASSETS-----`))
+		if i >= 0 && j > i {
+			zippedData = statikFile[i : j+len(`-----END COZY ASSETS-----`)]
 		}
 	}
 
@@ -274,12 +274,12 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 		data []byte
 	})
 	if len(zippedData) > 0 {
-		zipData := new(bytes.Buffer)
-		if err = FreadZipData(zipData, zippedData); err != nil {
+		zipData, err := FreadZipData(zippedData)
+		if err != nil {
 			return fmt.Errorf("Could not read zip data from current file: %s", err)
 		}
 		var zipReader *zip.Reader
-		zipReader, err = zip.NewReader(bytes.NewReader(zipData.Bytes()), int64(zipData.Len()))
+		zipReader, err = zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
 		if err != nil {
 			return fmt.Errorf("Could not read zip data from current file: %s", err)
 		}
@@ -441,61 +441,19 @@ func writeExternal(w *zip.Writer, ext *external, data []byte) (size uint64, err 
 
 // FprintZipData converts zip binary contents to a string literal.
 func FprintZipData(dest *bytes.Buffer, zipData []byte) {
-	for _, b := range zipData {
-		if b == '\n' {
-			dest.WriteString(`\n`)
-			continue
-		}
-		if b == '\\' {
-			dest.WriteString(`\\`)
-			continue
-		}
-		if b == '"' {
-			dest.WriteString(`\"`)
-			continue
-		}
-		if (b >= 32 && b <= 126) || b == '\t' {
-			dest.WriteByte(b)
-			continue
-		}
-		fmt.Fprintf(dest, "\\x%02x", b)
-	}
+	pem.Encode(dest, &pem.Block{
+		Type:  "COZY ASSETS",
+		Bytes: zipData,
+	})
 }
 
 // FreadZipData converts string literal into a zip binary.
-func FreadZipData(dest *bytes.Buffer, zippedData []byte) error {
-	for i := 0; i < len(zippedData); i++ {
-		b := zippedData[i]
-		if b == '\\' {
-			i++
-			if i >= len(zippedData) {
-				return errZipMalformed
-			}
-			switch zippedData[i] {
-			case 'n':
-				dest.WriteByte('\n')
-			case '\\':
-				dest.WriteByte('\\')
-			case '"':
-				dest.WriteByte('"')
-			case 'x':
-				i += 2
-				if i >= len(zippedData) {
-					return errZipMalformed
-				}
-				s, err := hex.DecodeString(string(zippedData[i-1 : i+1]))
-				if err != nil {
-					return err
-				}
-				dest.Write(s)
-			}
-		} else if (b >= 32 && b <= 126) || b == '\t' {
-			dest.WriteByte(b)
-		} else {
-			return errZipMalformed
-		}
+func FreadZipData(zippedData []byte) ([]byte, error) {
+	block, _ := pem.Decode(zippedData)
+	if block == nil || block.Type != "COZY ASSETS" {
+		return nil, errors.New("could not pem encoded zipped data")
 	}
-	return nil
+	return block.Bytes, nil
 }
 
 // Prints out the error message and exists with a non-success signal.
