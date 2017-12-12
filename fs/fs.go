@@ -16,9 +16,9 @@
 package fs
 
 import (
-	"archive/zip"
 	"bytes"
-	"crypto/md5"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -38,12 +38,13 @@ const sumLen = 9
 
 // file holds unzipped read-only file contents and file metadata.
 type file struct {
-	infos os.FileInfo
-	data  []byte
-	size  string
-	etag  string
-	name  string
-	mime  string
+	zippedData   []byte
+	zippedSize   string
+	unzippedData []byte
+	unzippedSize string
+	etag         string
+	name         string
+	mime         string
 }
 
 var files map[string]*file
@@ -57,60 +58,62 @@ func Register(zipData string) {
 	if zipData == "" {
 		panic("statik/fs: no zip data registered")
 	}
-	block, _ := pem.Decode([]byte(zipData))
-	zipReader, err := zip.NewReader(bytes.NewReader(block.Bytes), int64(len(block.Bytes)))
-	if err != nil {
-		panic(fmt.Errorf("statik/fs: %s", err))
-	}
 	files = make(map[string]*file)
-	for _, zipFile := range zipReader.File {
-		f, err := unzip(zipFile)
-		if err != nil {
-			panic(fmt.Errorf("statik/fs: error unzipping file %q: %s", zipFile.Name, err))
-		}
-		files[zipFile.Name] = f
+	if err := unzip([]byte(zipData)); err != nil {
+		panic(fmt.Errorf("statik/fs: error unzipping data: %s", err))
 	}
 }
 
-func unzip(zf *zip.File) (*file, error) {
-	rc, err := zf.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
+func unzip(data []byte) (err error) {
+	for {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			break
+		}
+		var gr *gzip.Reader
+		gr, err = gzip.NewReader(bytes.NewReader(block.Bytes))
+		if err != nil {
+			return
+		}
+		var b []byte
+		h := sha256.New()
+		r := io.TeeReader(gr, h)
+		b, err = ioutil.ReadAll(r)
+		if err != nil {
+			return
+		}
+		if err = gr.Close(); err != nil {
+			return
+		}
 
-	mime, r := magic.MIMETypeFromReader(rc)
-	if mime == "" {
-		mime = magic.MIMETypeByExtension(path.Ext(zf.Name))
-	}
-	if mime == "" {
-		mime = "application/octet-stream"
-	}
+		name := block.Headers["Name"]
+		mime := magic.MIMEType(b)
+		if mime == "" {
+			mime = magic.MIMETypeByExtension(path.Ext(name))
+		}
+		if mime == "" {
+			mime = "application/octet-stream"
+		}
 
-	h := md5.New()
-	r = io.TeeReader(r, h)
-	data, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, err
+		sumx := hex.EncodeToString(h.Sum(nil))
+		etag := fmt.Sprintf(`"%s"`, sumx[:sumLen])
+		nameWithSum := name
+		if off := strings.IndexByte(name, '.'); off >= 0 {
+			nameWithSum = name[:off] + "." + sumx[:sumLen] + name[off:]
+		}
+
+		files[name] = &file{
+			zippedData:   block.Bytes,
+			zippedSize:   strconv.Itoa(len(block.Bytes)),
+			unzippedData: b,
+			unzippedSize: strconv.Itoa(len(b)),
+			etag:         etag,
+			name:         nameWithSum,
+			mime:         mime,
+		}
+		data = rest
 	}
-
-	sumx := hex.EncodeToString(h.Sum(nil))
-	etag := fmt.Sprintf(`"%s"`, sumx)
-	size := strconv.Itoa(len(data))
-
-	name := zf.Name
-	if off := strings.IndexByte(name, '.'); off >= 0 {
-		name = name[:off] + "." + sumx[:sumLen] + name[off:]
-	}
-
-	return &file{
-		infos: zf.FileInfo(),
-		data:  data,
-		etag:  etag,
-		name:  name,
-		size:  size,
-		mime:  mime,
-	}, nil
+	return
 }
 
 func Open(name string) (*bytes.Reader, error) {
@@ -119,7 +122,7 @@ func Open(name string) (*bytes.Reader, error) {
 	}
 	f, ok := files[name]
 	if ok {
-		return bytes.NewReader(f.data), nil
+		return bytes.NewReader(f.unzippedData), nil
 	}
 	return nil, os.ErrNotExist
 }
@@ -224,7 +227,6 @@ func (h *StatikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	headers := w.Header()
 	headers.Set("Content-Type", f.mime)
-	headers.Set("Content-Length", f.size)
 	if id != "" {
 		headers.Set("Cache-Control", "max-age=31557600")
 	} else {
@@ -233,7 +235,16 @@ func (h *StatikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet {
-		io.Copy(w, bytes.NewReader(f.data))
+		headers.Add("Vary", "Accept-Encoding")
+		acceptsGZIP := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
+		if acceptsGZIP {
+			headers.Set("Content-Encoding", "gzip")
+			headers.Set("Content-Length", f.zippedSize)
+			io.Copy(w, bytes.NewReader(f.zippedData))
+		} else {
+			headers.Set("Content-Length", f.unzippedSize)
+			io.Copy(w, bytes.NewReader(f.unzippedData))
+		}
 	}
 }
 

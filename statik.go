@@ -17,9 +17,9 @@
 package main
 
 import (
-	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
@@ -32,8 +32,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"time"
 
 	humanize "github.com/dustin/go-humanize"
 )
@@ -44,16 +44,11 @@ const (
 )
 
 var (
-	flagSrc        = flag.String("src", path.Join(".", "public"), "The path of the source directory.")
-	flagDest       = flag.String("dest", ".", "The destination path of the generated package.")
-	flagExternals  = flag.String("externals", "", "File containing a description of externals assets to download.")
-	flagNoCompress = flag.Bool("Z", false, "Do not use compression to shrink the files.")
-	flagForce      = flag.Bool("f", false, "Overwrite destination file if it already exists.")
+	flagSrc       = flag.String("src", path.Join(".", "public"), "The path of the source directory.")
+	flagDest      = flag.String("dest", ".", "The destination path of the generated package.")
+	flagExternals = flag.String("externals", "", "File containing a description of externals assets to download.")
+	flagForce     = flag.Bool("f", false, "Overwrite destination file if it already exists.")
 )
-
-// mtimeDate holds the arbitrary mtime that we assign to files when
-// flagNoMtime is set.
-var mtimeDate = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 var (
 	errExternalsMalformed = errors.New("assets externals file malformed")
@@ -63,6 +58,13 @@ var (
 type external struct {
 	name   string
 	url    string
+	sha256 []byte
+}
+
+type file struct {
+	name   string
+	size   int64
+	data   []byte
 	sha256 []byte
 }
 
@@ -161,22 +163,9 @@ func rename(src, dest string) error {
 // that contains source directory's contents as zip contents.
 // Generates source registers generated zip contents data to
 // be read by the statik/fs HTTP file system.
-func generateSource(srcPath, externalsFile string) (file *os.File, err error) {
-	var (
-		buffer    bytes.Buffer
-		zipWriter io.Writer
-	)
+func generateSource(srcPath, externalsFile string) (f *os.File, err error) {
+	var files []*file
 
-	zipWriter = &buffer
-	f, err := ioutil.TempFile("", namePackage)
-	if err != nil {
-		return
-	}
-
-	zipWriter = io.MultiWriter(zipWriter, f)
-	defer f.Close()
-
-	w := zip.NewWriter(zipWriter)
 	if err = filepath.Walk(srcPath, func(name string, fi os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -196,35 +185,26 @@ func generateSource(srcPath, externalsFile string) (file *os.File, err error) {
 		if err != nil {
 			return err
 		}
-		fHeader, err := zip.FileInfoHeader(fi)
-		if err != nil {
-			return err
-		}
-		// Always use the same modification time so that
-		// the output is deterministic with respect to the file contents.
-		fHeader.SetModTime(mtimeDate)
-		fHeader.Name = path.Join("/", filepath.ToSlash(relPath))
-		if !*flagNoCompress {
-			fHeader.Method = zip.Deflate
-		}
-		f, err := w.CreateHeader(fHeader)
-		if err != nil {
-			return err
-		}
-		_, err = f.Write(b)
-		return err
+		h := sha256.New()
+		h.Write(b)
+		files = append(files, &file{
+			name:   path.Join("/", filepath.ToSlash(relPath)),
+			size:   fi.Size(),
+			sha256: h.Sum(nil),
+			data:   b,
+		})
+		return nil
 	}); err != nil {
 		return
 	}
 
 	if externalsFile != "" {
-		if err = downloadExternals(externalsFile, w); err != nil {
+		var exts []*file
+		exts, err = downloadExternals(externalsFile)
+		if err != nil {
 			return
 		}
-	}
-
-	if err = w.Close(); err != nil {
-		return
+		files = append(files, exts...)
 	}
 
 	// then embed it as a quoted string
@@ -240,76 +220,54 @@ import (
 func init() {
 	data := `, namePackage)
 	qb.WriteByte('`')
-	FprintZipData(&qb, buffer.Bytes())
+	FprintZipData(&qb, files)
 	qb.WriteByte('`')
 	fmt.Fprint(&qb, `
 	fs.Register(data)
 }
 `)
 
+	f, err = ioutil.TempFile("", namePackage)
+	if err != nil {
+		return
+	}
 	if err = ioutil.WriteFile(f.Name(), qb.Bytes(), 0644); err != nil {
 		return
 	}
-	return f, nil
+	return
 }
 
-func downloadExternals(filename string, w *zip.Writer) (err error) {
+func downloadExternals(filename string) (exts []*file, err error) {
 	destDir := path.Join(*flagDest, namePackage)
 	statikFile, err := ioutil.ReadFile(path.Join(destDir, nameSourceFile))
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return
 	}
 
 	var zippedData []byte
 	if len(statikFile) > 0 {
-		i := bytes.Index(statikFile, []byte(`-----BEGIN COZY ASSETS-----`))
-		j := bytes.Index(statikFile, []byte(`-----END COZY ASSETS-----`))
-		if i >= 0 && j > i {
-			zippedData = statikFile[i : j+len(`-----END COZY ASSETS-----`)]
+		i := bytes.Index(statikFile, []byte("`"))
+		if i >= 0 {
+			j := bytes.Index(statikFile[i+1:], []byte("`"))
+			if i >= 0 && j > i {
+				zippedData = statikFile[i : i+j]
+			}
 		}
 	}
 
-	files := make(map[string]struct {
-		sum  []byte
-		data []byte
-	})
+	files := make(map[string]*file)
 	if len(zippedData) > 0 {
-		zipData, err := FreadZipData(zippedData)
-		if err != nil {
-			return fmt.Errorf("Could not read zip data from current file: %s", err)
-		}
-		var zipReader *zip.Reader
-		zipReader, err = zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
-		if err != nil {
-			return fmt.Errorf("Could not read zip data from current file: %s", err)
-		}
-		for _, zipFile := range zipReader.File {
-			var rc io.ReadCloser
-			var data []byte
-			rc, err = zipFile.Open()
-			if err != nil {
-				return fmt.Errorf("Could not read zip data from current file: %s", err)
-			}
-			h := sha256.New()
-			r := io.TeeReader(rc, h)
-			data, err = ioutil.ReadAll(r)
-			if err != nil {
-				return fmt.Errorf("Could not read zip data from current file: %s", err)
-			}
-			rc.Close()
-			files[zipFile.Name] = struct {
-				sum  []byte
-				data []byte
-			}{
-				sum:  h.Sum(nil),
-				data: data,
+		fs, err := FreadZipData(zippedData)
+		if err == nil {
+			for _, f := range fs {
+				files[f.name] = f
 			}
 		}
 	}
 
 	f, err := os.Open(filename)
 	if err != nil {
-		return err
+		return
 	}
 	defer func() {
 		if errc := f.Close(); errc != nil && err == nil {
@@ -330,7 +288,7 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 
 		if fieldsLen == 0 {
 			if ext != nil {
-				return errExternalsMalformed
+				return nil, errExternalsMalformed
 			}
 		} else if fieldsLen == 2 {
 			if ext == nil {
@@ -344,11 +302,11 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 			case "sha256":
 				ext.sha256, err = hex.DecodeString(fields[1])
 				if err != nil {
-					return errExternalsMalformed
+					return nil, errExternalsMalformed
 				}
 			}
 		} else {
-			return errExternalsMalformed
+			return nil, errExternalsMalformed
 		}
 
 		if ext == nil || ext.name == "" || ext.url == "" || len(ext.sha256) == 0 {
@@ -358,46 +316,51 @@ func downloadExternals(filename string, w *zip.Writer) (err error) {
 		var data []byte
 		fmt.Printf("file %q... ", ext.name)
 		if obj, ok := files[ext.name]; ok {
-			if bytes.Equal(obj.sum, ext.sha256) {
+			if bytes.Equal(obj.sha256, ext.sha256) {
 				data = obj.data
 			}
 		}
 
+		var f *file
 		if len(data) == 0 {
-			if err = downloadExternal(w, ext); err != nil {
-				return
-			}
+			f, err = downloadExternal(ext)
 		} else {
-			if _, err = writeExternal(w, ext, data); err != nil {
-				return
-			}
 			fmt.Println("skipped")
+			f = &file{
+				data:   data,
+				name:   ext.name,
+				size:   int64(len(data)),
+				sha256: ext.sha256,
+			}
 		}
-
+		if err != nil {
+			return
+		}
+		exts = append(exts, f)
 		ext = nil
 	}
 
-	return scanner.Err()
+	return exts, scanner.Err()
 }
 
-func downloadExternal(w *zip.Writer, ext *external) (err error) {
-	var size uint64
+func downloadExternal(ext *external) (f *file, err error) {
+	var size int64
 
 	fmt.Printf("downloading... ")
 	defer func() {
 		if err == nil {
-			fmt.Printf("ok (%s)\n", humanize.Bytes(size))
+			fmt.Printf("ok (%s)\n", humanize.Bytes(uint64(size)))
 		}
 	}()
 
 	res, err := http.Get(ext.url)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("could not fetch external assets %q: received status \"%d %s\"",
+		return nil, fmt.Errorf("could not fetch external assets %q: received status \"%d %s\"",
 			ext.url, res.StatusCode, res.Status)
 	}
 
@@ -406,54 +369,85 @@ func downloadExternal(w *zip.Writer, ext *external) (err error) {
 
 	data, err := ioutil.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("could not fetch external asset: %s", err)
+		return nil, fmt.Errorf("could not fetch external asset: %s", err)
 	}
 
 	if sum := h.Sum(nil); !bytes.Equal(sum, ext.sha256) {
-		return fmt.Errorf("shasum does not match: expected %x got %x",
+		return nil, fmt.Errorf("shasum does not match: expected %x got %x",
 			ext.sha256, sum)
 	}
 
-	size, err = writeExternal(w, ext, data)
-	return
+	size = int64(len(data))
+	return &file{
+		data:   data,
+		name:   ext.name,
+		size:   size,
+		sha256: ext.sha256,
+	}, nil
 }
 
-func writeExternal(w *zip.Writer, ext *external, data []byte) (size uint64, err error) {
-	size = uint64(len(data))
-
-	fh := &zip.FileHeader{
-		Name:               ext.name,
-		UncompressedSize64: size,
+// FreadZipData converts string literal into a zip binary.
+func FreadZipData(data []byte) (files []*file, err error) {
+	for {
+		block, rest := pem.Decode(data)
+		if block == nil {
+			break
+		}
+		var size int64
+		size, err = strconv.ParseInt(block.Headers["Size"], 10, 64)
+		if err != nil {
+			return
+		}
+		var gr *gzip.Reader
+		gr, err = gzip.NewReader(bytes.NewReader(block.Bytes))
+		if err != nil {
+			return
+		}
+		var b []byte
+		h := sha256.New()
+		r := io.TeeReader(gr, h)
+		b, err = ioutil.ReadAll(r)
+		if err != nil {
+			return
+		}
+		if err = gr.Close(); err != nil {
+			return
+		}
+		files = append(files, &file{
+			name:   block.Headers["Name"],
+			size:   size,
+			data:   b,
+			sha256: h.Sum(nil),
+		})
+		data = rest
 	}
-	fh.SetModTime(mtimeDate)
-	fh.SetMode(0644)
-	if !*flagNoCompress {
-		fh.Method = zip.Deflate
-	}
-
-	f, err := w.CreateHeader(fh)
-	if err != nil {
-		return
-	}
-	_, err = io.Copy(f, bytes.NewReader(data))
 	return
 }
 
 // FprintZipData converts zip binary contents to a string literal.
-func FprintZipData(dest *bytes.Buffer, zipData []byte) {
-	pem.Encode(dest, &pem.Block{
-		Type:  "COZY ASSETS",
-		Bytes: zipData,
-	})
+func FprintZipData(dest *bytes.Buffer, files []*file) {
+	for _, f := range files {
+		b := new(bytes.Buffer)
+		gw, err := gzip.NewWriterLevel(b, gzip.BestCompression)
+		panicOnError(err)
+		_, err = io.Copy(gw, bytes.NewReader(f.data))
+		panicOnError(err)
+		panicOnError(gw.Close())
+		pem.Encode(dest, &pem.Block{
+			Type:  "COZY ASSET",
+			Bytes: b.Bytes(),
+			Headers: map[string]string{
+				"Name": f.name,
+				"Size": strconv.FormatInt(f.size, 10),
+			},
+		})
+	}
 }
 
-// FreadZipData converts string literal into a zip binary.
-func FreadZipData(zippedData []byte) ([]byte, error) {
-	block, _ := pem.Decode(zippedData)
-	if block == nil || block.Type != "COZY ASSETS" {
-		return nil, errors.New("could not pem encoded zipped data")
+func panicOnError(err error) {
+	if err != nil {
+		panic(fmt.Errorf("Unexpected error: %s", err))
 	}
-	return block.Bytes, nil
 }
 
 // Prints out the error message and exists with a non-success signal.
