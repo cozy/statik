@@ -227,6 +227,7 @@ func (h *StatikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	headers := w.Header()
 	headers.Set("Content-Type", f.mime)
+	headers.Add("Vary", "Accept-Encoding")
 	if id != "" {
 		headers.Set("Cache-Control", "max-age=31557600")
 	} else {
@@ -234,15 +235,17 @@ func (h *StatikHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		headers.Set("Cache-Control", "no-cache")
 	}
 
+	acceptsGZIP := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
+	if acceptsGZIP {
+		headers.Set("Content-Encoding", "gzip")
+		headers.Set("Content-Length", f.zippedSize)
+	} else {
+		headers.Set("Content-Length", f.unzippedSize)
+	}
 	if r.Method == http.MethodGet {
-		headers.Add("Vary", "Accept-Encoding")
-		acceptsGZIP := strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
 		if acceptsGZIP {
-			headers.Set("Content-Encoding", "gzip")
-			headers.Set("Content-Length", f.zippedSize)
 			io.Copy(w, bytes.NewReader(f.zippedData))
 		} else {
-			headers.Set("Content-Length", f.unzippedSize)
 			io.Copy(w, bytes.NewReader(f.unzippedData))
 		}
 	}
