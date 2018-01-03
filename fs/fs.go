@@ -29,7 +29,7 @@ import (
 	"strconv"
 	"strings"
 
-	"camlistore.org/pkg/magic"
+	"github.com/cozy/cozy-stack/pkg/magic"
 )
 
 var assets map[string]*Asset
