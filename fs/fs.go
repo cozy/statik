@@ -104,9 +104,9 @@ func unzip(data []byte) (err error) {
 		}
 
 		name := block.Headers["Name"]
-		mime := magic.MIMEType(unzippedData)
+		mime := magic.MIMETypeByExtension(path.Ext(name))
 		if mime == "" {
-			mime = magic.MIMETypeByExtension(path.Ext(name))
+			mime = magic.MIMEType(unzippedData)
 		}
 		if mime == "" {
 			mime = "application/octet-stream"
